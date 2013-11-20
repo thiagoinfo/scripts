@@ -27,4 +27,4 @@ if [[ -z $IPA_USER ]] || [[ -z $IPA_PWD ]] ; then
    exit 1
 fi
 
-ipa-client-install --enable-dns-updates --mkhomedir --hostname=$(hostname -f) -p"$IPA_USER" -w"$IPA_PWD" --unattended
+/usr/sbin/ipa-client-install --enable-dns-updates --mkhomedir --hostname=$(hostname -f) -p"$IPA_USER" -w"$IPA_PWD" --unattended

@@ -7,4 +7,5 @@
 
 set -e
 
-ipa-client-install --uninstall --unattended
+# Disabled. 
+#/usr/sbin/ipa-client-install --uninstall --unattended
