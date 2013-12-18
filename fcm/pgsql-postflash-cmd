@@ -1,0 +1,56 @@
+#!/bin/bash
+#
+# Postgres online backup: post-snapshot script
+#
+# Unfreezes Postgres database filesystem and releases Postgres from "online backup" state.
+# pg_stop_backup() archives all neccesary WAL files and produces "/var/lib/pgsql/9.1/data/pg_xlog/xxxxxxxxxxxxxxxxxxxxxxxx.yyyyyyyy.backup" file
+#
+# Matvey Marinin 2013
+#
+# Script usually runs as "postgres" uid, so it needs permission to "sudo /sbin/fsfreeze" (see /etc/sudoers.d/06_fcm)
+#
+# NOTE: if "fsfreeze -u" command fail, Postgres will hang forever!!! Fix with "fsfreeze -u /var/lib/pgsql/9.1/data" as root.
+#
+# v3 - 
+#
+
+### There is no need to recover from errors, just exit  ###
+set -e
+
+## Postgres database mount point  ##
+FILESYSTEM=$1
+
+## Postgres instance port ##
+PG_PORT=$2
+
+[[ -z "$FILESYSTEM" ]] && FILESYSTEM=/var/lib/pgsql/9.1/data
+[[ -z "$PG_PORT" ]] && PG_PORT=5432
+
+echo "Running $(basename $0) as UID $EUID, filesystem $FILESYSTEM, pg_port $PG_PORT"
+
+### Unfreeze filesystem ###
+
+echo "Unfreezing filesystem $FILESYSTEM"
+if (( $EUID == 0 )); then
+  fsfreeze -u "$FILESYSTEM"
+else
+  sudo fsfreeze -u "$FILESYSTEM"
+fi
+
+### Find uid of "postgres" user ###
+PG_UID=$(id -u postgres)
+if (( $? != 0 )); then
+  echo "Cant get uid of postgres user" 1>&2
+  exit 1
+fi
+
+### Run pg_stop_backup()  ###
+echo "Running pg_stop_backup()..."
+if (( $EUID == "$PG_UID" )); then
+  psql -p "$PG_PORT" -t -c "SELECT pg_stop_backup();" || /bin/true
+else
+  sudo -u postgres psql -p "$PG_PORT" -t -c "SELECT pg_stop_backup();" || /bin/true
+fi
+echo "pg_stop_backup() finished"
+
+

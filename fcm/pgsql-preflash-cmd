@@ -1,0 +1,81 @@
+#!/bin/bash
+#
+# Postgres online backup pre-snapshot script
+# Freezes Postgres database filesystem and puts db server to "online backup" state
+#
+# Matvey Marinin 2013
+#
+# Usage: pgsql-preflash-cmd [<database mount point>] [<db instance port>]
+#
+# default <database mount point> = /var/lib/pgsql/9.1/data
+# default <db instance port> = 5432
+#
+# Script usually runs as "postgres" uid, so "postgres" user needs permission to "sudo /sbin/fsfreeze" (see /etc/sudoers.d/06_fcm)
+#
+# NOTE: if "fsfreeze -u" command fails, Postgres hangs forever!!! Fix with "fsfreeze -u /var/lib/pgsql/9.1/data" as root.
+#
+# v2 - skip pg_start_backup()/pg_stop_backup() if server is stopped
+# v3 - pg_port and filesystem parameters
+#
+
+## Postgres database mount point  ##
+FILESYSTEM=$1
+
+## Postgres instance port ##
+PG_PORT=$2
+
+[[ -z "$FILESYSTEM" ]] && FILESYSTEM=/var/lib/pgsql/9.1/data
+[[ -z "$PG_PORT" ]] && PG_PORT=5432
+
+echo "Running $(basename $0) as UID $EUID, filesystem $FILESYSTEM, pg_port $PG_PORT"
+
+### Find uid of "postgres" user ###
+PG_UID=$(id -u postgres)
+if (( $? != 0 )); then
+  echo "Cant get uid of postgres user" 1>&2
+  exit 1
+fi
+
+### Run pg_start_backup()  ###
+BACKUP_LABEL="fcm_$(date +%Y%m%d%H%M%S)"
+echo "Running pg_start_backup()..."
+if (( $EUID == "$PG_UID" )); then
+  PSQLSUDO=""
+else
+  PSQLSUDO="sudo -u postgres"
+fi
+
+$PSQLSUDO psql -p "$PG_PORT" -t -c "SELECT pg_start_backup('$BACKUP_LABEL', true);"; PSQL_STATUS=$?
+
+if (( "$PSQL_STATUS" == 0 )); then
+  echo "OK: pg_start_backup() finished"
+elif (( "$PSQL_STATUS" == 2 )); then
+  echo "WARNING: seems like Postgres server is down, continuing without pg_start_backup()"
+else
+  echo "ERROR: pg_start_backup() failed" 1>&2
+  exit 1
+fi
+
+### Freeze filesystem ###
+echo "Freezing filesystem $FILESYSTEM"
+if (( $EUID == 0 )); then
+  /sbin/fsfreeze -f "$FILESYSTEM"
+else
+  sudo /sbin/fsfreeze -f "$FILESYSTEM"
+fi
+
+### If "fsfreeze -f" was unsuccessfull, we need to disable pgsql "online backup" state  ###
+if (( $? != 0 )); then
+  echo "ERROR: fsfreeze failed, running pg_stop_backup()" 1>&2
+  if (( $EUID == "$PG_UID" )); then
+    psql -p "$PG_PORT" -t -c "SELECT pg_stop_backup();" || /bin/true
+  else
+    sudo -u postgres psql -p "$PG_PORT" -t -c "SELECT pg_stop_backup();" || /bin/true
+  fi
+  echo "pg_stop_backup() finished"
+  
+  ### return error status as fsfreeze was failed ###
+  exit 1
+else
+  echo "OK: filesystem is frozen"
+fi

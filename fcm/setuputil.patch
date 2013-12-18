@@ -1,0 +1,11 @@
+--- setuputil.orig	2013-02-04 17:30:00.000000000 +0400
++++ setuputil	2013-11-28 13:12:59.616457048 +0400
+@@ -5036,7 +5036,7 @@
+   case `uname` in
+   "Linux")
+   # --------------------------------------- LINUX ----------------------------------------------------------------------------------------
+-   GSKIT_INSTALL_OUTPUT=`rpm -U ${INST_DIR}${FCM_DIR}/gskit_install/gskcrypt64-${GSKIT_MINIMUM_VERSION}.linux.x86_64.rpm ${INST_DIR}${FCM_DIR}/gskit_install/gskssl64-${GSKIT_MINIMUM_VERSION}.linux.x86_64.rpm 2>&1`
++   GSKIT_INSTALL_OUTPUT=`rpm -F ${INST_DIR}${FCM_DIR}/gskit_install/gskcrypt64-${GSKIT_MINIMUM_VERSION}.linux.x86_64.rpm ${INST_DIR}${FCM_DIR}/gskit_install/gskssl64-${GSKIT_MINIMUM_VERSION}.linux.x86_64.rpm 2>&1`
+    RC=$?;
+    if test ${RC} -ne 0; then
+       # Note: exit code of rpm is not really helpfull since it's ambigious. exit code = 1 could mean package is already installed (same version) which is harmless but could
