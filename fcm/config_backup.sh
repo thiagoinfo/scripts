@@ -1,0 +1,259 @@
+#!/bin/bash
+# 
+# Скрипт для настройки нового инстанса FCM для заданного сервера
+#
+# config_backup.sh <db_server> [<instance_dir>] [<db_port>]
+#
+# config_backup.sh fcm-test-db
+# config_backup.sh test-db-slaver /var/lib/pgsql/9.1_5433
+#
+# Параметры:
+#   <db_server>    - DNS-имя сервера БД
+#   <instance_dir> - необязательный параметр для серверов с несколькими инстансами БД, путь вида /var/lib/pgsql/9.1_5433. Если не указан - берется стандартный /var/lib/pgsql/9.1
+#   <db_port>      - необязательный параметр для серверов с несколькими инстансами, номер порта Postgres. Если не указан - берется из <instance_dir> или стандартный 5432
+#
+# Схема chroot:
+# /var/run/fcm/<db_name>/<instance>/ = chroot( / )
+#                                  |
+#                                  -- dev,proc,sys,tmp = mount_bind( соответствующие служебные ФС )
+#                                  |
+#                                  -- var/lib/pgsql/<instance>/
+#                                                              |
+#                                                              -- acs  = mount_bind( /var/fcm/<db_name>/<instance>/acs )
+#                                                              -- data = flashcopy mount point
+# Каталоги с данными:
+# /var/run/fcm/<db_name>/<instance> - корневой каталог chroot инстанса FCM
+# /var/fcm/<db_name>/<instance>/acs - каталог acs (бинарники, профиль, логи)
+# /var/run/fcm/<db_name>/<instance>/var/lib/pgsql/<instance>/data - по этому пути точка монтирования flashcopy будет видна в корневой ФС
+# /var/lib/pgsql - каталог с инстансами БД, видимый через chroot, должен быть пустым в корневой ФС
+#
+
+DB_SERVER=$1
+INSTANCE_DIR=$2
+DB_PORT=$3
+
+STORAGE_SYSTEM="dev-svc1"
+ACSD_PORT=50001
+
+
+if [[ -z "$DB_SERVER" ]]; then
+  echo "ERROR: <db_server> is not specified                           " 1>&2
+  echo "USAGE: config_backup.sh <db_server> <instance_dir>            " 1>&2
+  echo "       config_backup.sh fcm-test-db                           " 1>&2
+  echo "       config_backup.sh test-db-slaver /var/lib/pgsql/9.1_5433" 1>&2
+  exit 1
+fi
+
+# use standard "/var/lib/pgsql/9.1" if instance_dir isn`t supplied
+if [[ -z "$INSTANCE_DIR" ]]; then
+  INSTANCE_DIR="/var/lib/pgsql/9.1"
+  INSTANCE="9.1"
+else
+  #extract instance name from db path
+  INSTANCE=$(basename "$INSTANCE_DIR")
+
+  #extract port from instance name
+  [[ -z "$DB_PORT" ]] && DB_PORT=$( expr match $INSTANCE '.*\([0-9][0-9][0-9][0-9]\)' ) #'
+fi
+
+[[ -z "$DB_PORT" ]] && DB_PORT="5432"
+
+#extract hostname from db_server fqdn
+DB_NAME=${DB_SERVER%%.*}
+
+echo "DB_NAME = $DB_NAME"
+echo "INSTANCE_DIR = $INSTANCE_DIR"
+echo "INSTANCE = $INSTANCE"
+echo "DB_PORT = $DB_PORT"
+
+# шаблон чистого каталога acs с исполняемыми файлами
+ACS_TEMPLATE="/opt/tivoli/acs_template"
+
+######################################################################
+# setuputil
+# function check_ssh_key_auth <remote host> <username on remote host>
+# check if we could login without a password login
+######################################################################
+check_ssh_key_auth()
+{
+server="$1"
+username="$2"
+echo "Checking SSH key authentication..."
+ssh -q -o "BatchMode=yes" ${username}@${server} "echo 2>&1"
+if test $? -eq 0; then
+  echo "SSH key authentication was successful."
+  return 0;
+else
+  echo "SSH key authentication failed.";
+  return 2;
+fi
+}
+
+
+### настройка удаленного сервера БД (BS) ###
+
+# настраиваем рутовый ssh-доступ без пароля к серверу БД
+# необходим для настройки FCM и последующего запуска бакапов
+if ! check_ssh_key_auth $DB_SERVER "root"; then
+  echo "Configuring SSH key authentication..."
+  { ssh-copy-id "root@$DB_SERVER" && check_ssh_key_auth $DB_SERVER "root"; } || { echo "Could not enable SSH key authentication" 1>&2; exit 1; }
+fi
+
+# останавливаем демоны acsd и acsgend
+DB_ACSD="acsd"
+DB_ACSGEND="acsgend"
+if [[ "$INSTANCE" != "9.1"  ]]; then
+  DB_ACSD="$DB_ACSD-$INSTANCE"
+  DB_ACSGEND="$DB_ACSGEND-$INSTANCE"
+fi
+
+echo "Stopping $DB_ACSD and $DB_ACSGEND"
+ssh "root@$DB_SERVER" "if initctl status $DB_ACSD    | grep -qcF start; then initctl stop $DB_ACSD;    fi";
+ssh "root@$DB_SERVER" "if initctl status $DB_ACSGEND | grep -qcF start; then initctl stop $DB_ACSGEND; fi";
+
+DB_ACS_DIR="$INSTANCE_DIR/acs"
+
+# копируем исполняемые файлы FCM
+echo "Copying FCM binary"
+rsync -a --exclude '/logs/' --exclude '/pipes/' --exclude '/repo/' --exclude '/shared/' --exclude '/profile*' --exclude '/infile*' --exclude '/fcmcert.*' --exclude '/fcmselfcert.arm' "$ACS_TEMPLATE/" "root@$DB_SERVER:$DB_ACS_DIR/"
+
+# создаем файлы конфигурации: 
+echo "Writing config files"
+
+# записываем infile
+ssh "root@$DB_SERVER" "echo \"$INSTANCE_DIR/data/PG_VERSION\" > $DB_ACS_DIR/infile"
+
+# записываем общую часть profile
+ssh "root@$DB_SERVER" "cat > $DB_ACS_DIR/profile" <<EOF
+>>> GLOBAL
+ACS_DIR $DB_ACS_DIR
+ACSD $DB_SERVER $ACSD_PORT
+TRACE YES
+<<<
+
+>>> ACSD
+ACS_REPOSITORY $DB_ACS_DIR/repo
+# REPOSITORY_LABEL TSM
+<<<
+
+>>> CLIENT
+# BACKUPIDPREFIX GEN___
+APPLICATION_TYPE GENERIC
+INFILE $DB_ACS_DIR/infile
+PRE_FLASH_CMD $DB_ACS_DIR/pgsql-preflash-cmd $INSTANCE_DIR/data $DB_PORT
+POST_FLASH_CMD $DB_ACS_DIR/pgsql-postflash-cmd $INSTANCE_DIR/data $DB_PORT
+TSM_BACKUP LATEST
+MAX_VERSIONS ADAPTIVE
+# LVM_FREEZE_THAW AUTO
+NEGATIVE_LIST NO_CHECK
+TIMEOUT_FLASH 120
+# GLOBAL_SYSTEM_IDENTIFIER
+# DEVICE_CLASS STANDARD
+TIMEOUT_PARTITION 180
+TIMEOUT_PREPARE 180
+TIMEOUT_VERIFY 1200
+TIMEOUT_CLOSE 1200
+<<<
+
+EOF
+
+# добавляем в profile конфигурацию заданной системы хранения
+STORAGE_SYSTEM_TEMPLATE="$ACS_TEMPLATE/profile.$STORAGE_SYSTEM"
+
+if [[ -f "$STORAGE_SYSTEM_TEMPLATE" ]]; then
+  echo "Configuring storage system profile for $STORAGE_SYSTEM"
+  ssh "root@$DB_SERVER" "cat >> $DB_ACS_DIR/profile" < "$STORAGE_SYSTEM_TEMPLATE"
+  # также копируем файл паролей для заданной системы хранения
+  rsync -a "$ACS_TEMPLATE/shared/pwd.acsd.$STORAGE_SYSTEM" "root@$DB_SERVER:$DB_ACS_DIR/shared/pwd.acsd"
+else
+  echo "Cant find storage system profile: $STORAGE_SYSTEM_TEMPLATE" 1>&2
+  exit 1
+fi
+
+# настраиваем сертификаты
+# на сервере БД (PS) удаляем существующую базу сертификатов и генерируем новые с помощью утилиты FCM setup_gen.sh
+ssh "root@$DB_SERVER" "rm -f $DB_ACS_DIR/fcmcert.* $DB_ACS_DIR/fcmselfcert.arm"
+ssh "root@$DB_SERVER" "$DB_ACS_DIR/setup_gen.sh -a enable_gskit_PS -d $DB_ACS_DIR/../"
+
+# финальная операция настройки - исправление владельца файлов, везде postgres:postgres, у двух suid-binary acsd и fcmutil владелец root:postgres
+echo "Fixing file ownership"
+ssh "root@$DB_SERVER" "chown -R postgres:postgres $DB_ACS_DIR"
+ssh "root@$DB_SERVER" "chown root:postgres $DB_ACS_DIR/acsd $DB_ACS_DIR/fcmutil"
+
+# настройка BS закончена, запускаем демоны acsd и acsgend
+echo "Starting $DB_ACSD and $DB_ACSGEND"
+ssh "root@$DB_SERVER" "if initctl status $DB_ACSD    | grep -qcF stop; then initctl start $DB_ACSD;    fi";
+ssh "root@$DB_SERVER" "if initctl status $DB_ACSGEND | grep -qcF stop; then initctl start $DB_ACSGEND; fi";
+
+exit 0
+
+###### настройка локального сервера (BS) ####################################
+
+# корень chroot
+CHROOT_DIR="/var/run/fcm/$DB_NAME/$INSTANCE"
+
+# каталог нового инстанса FCM
+ACS_DIR="/var/fcm/$DB_NAME/$INSTANCE/acs"
+
+# путь к каталогу FCM внутри chroot
+CHROOT_ACS_DIR="$INSTANCE_DIR/acs"
+
+# имя инстанса mount-демона
+ACSGENMNT="acsgenmntd_$DB_NAME"
+
+# имя upstart-файла mount-демона
+ACSGENMNT_CONF="/etc/init/$ACSGENMNT.conf"
+
+# останавливаем mount daemon
+if [[ -f "$ACSGENMNT_CONF" ]]; then
+  echo "Stage 1: Stopping FCM mount daemon: $ACSGENMNT"
+  initctl stop "$ACSGENMNT"
+fi
+
+# настраиваем новый инстанс FCM
+if [[ ! -e "$ACS_DIR" ]]; then
+  mkdir -p "$ACS_DIR"
+  chown postgres:postgres "$ACS_DIR"
+fi
+
+echo "Stage 2: Deploying FCM binaries to $ACS_DIR"
+# обновляем бинарные файлы FCM из шаблона
+# в каталоге шаблона не должно быть рабочих подкаталогов shared,logs и файлов profile, infile, сертификатов
+rsync -aW --exclude '/logs/' --exclude '/pipes/' --exclude '/repo/' --exclude '/shared/' --exclude '/profile*' --exclude '/infile' --exclude '/fcmcert.*' --exclude '/fcmselfcert.arm' "$ACS_TEMPLATE/" "$ACS_DIR/"
+
+echo "Stage 3: Copying FCM configuration from server $DB_SERVER ($INSTANCE_DIR/acs)"
+# копируем конфигурационные файлы FCM с сервера БД
+rsync -av "root@$DB_SERVER:$INSTANCE_DIR/acs/fcmselfcert.arm" ":$INSTANCE_DIR/acs/shared" ":$INSTANCE_DIR/acs/fcmcert.*" ":$INSTANCE_DIR/acs/profile" ":$INSTANCE_DIR/acs/infile" "$ACS_DIR/"
+
+echo "Stage 4: Configuring FCM mount daemon $ACSGENMNT"
+# настраиваем upstart-файл mount-демона
+[[ -f "$ACSGENMNT_CONF" ]] && rm -f "$ACSGENMNT_CONF"
+
+cat >"$ACSGENMNT_CONF" <<EOF
+description     "FlashCopy Manager Mount Service"
+author          "IBM Corp."
+
+start on stopped rc RUNLEVEL=[2345]
+stop on starting rc RUNLEVEL=[016]
+
+chroot $CHROOT_DIR
+
+console output
+respawn
+
+pre-start script
+##  /usr/local/sbin/acs_chroot.sh $CHROOT_DIR $INSTANCE_DIR $ACS_DIR || { stop; exit 0; }
+  [ -x "$CHROOT_ACS_DIR/acsgen" ] || { stop; exit 0; }
+end script
+
+script
+  "$CHROOT_ACS_DIR/acsgen" -D -M -s STANDARD
+end script
+EOF
+
+# каталог chroot должен существовать перед запуском upstart-скрипта
+mkdir -p "$CHROOT_DIR"
+
+# запускаем mount daemon. Настройка chroot выполняется автоматически при старте демона.
+echo "Stage 5: Starting FCM mount daemon: $ACSGENMNT"
+#initctl start "$ACSGENMNT"
