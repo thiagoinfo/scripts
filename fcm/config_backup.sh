@@ -89,8 +89,114 @@ else
 fi
 }
 
+######################################################################
+# выводит в stdout глобальную часть профиля
+# Parameters:
+# $1 = ACS_DIR
+# $2 = ACDS_SERVER
+# $3 = ACSD_PORT
+######################################################################
+profile_global()
+{
+cat <<EOF
+>>> GLOBAL
+ACS_DIR $1
+ACSD $2 $3
+TRACE YES
+<<<
 
-### настройка удаленного сервера БД (BS) ###
+EOF
+}
+
+
+######################################################################
+# выводит в stdout профиль конфигурации ACSD
+# Parameters:
+# $1 = ACS_DIR
+######################################################################
+profile_acsd()
+{
+cat <<EOF
+>>> ACSD
+ACS_REPOSITORY $1/repo
+# REPOSITORY_LABEL TSM
+<<<
+
+EOF
+}
+
+######################################################################
+# выводит в stdout клиентский профиль PS
+# Parameters:
+# $1 = ACS_DIR
+# $2 = INSTANCE_DIR
+# $3 = DB_PORT
+######################################################################
+profile_client_PS()
+{
+cat <<EOF
+>>> CLIENT
+# BACKUPIDPREFIX GEN___
+APPLICATION_TYPE GENERIC
+INFILE $1/infile
+PRE_FLASH_CMD $1/pgsql-preflash-cmd $2/data $3
+POST_FLASH_CMD $1/pgsql-postflash-cmd $2/data $3
+TSM_BACKUP LATEST
+MAX_VERSIONS ADAPTIVE
+# LVM_FREEZE_THAW AUTO
+NEGATIVE_LIST NO_CHECK
+TIMEOUT_FLASH 120
+# GLOBAL_SYSTEM_IDENTIFIER
+DEVICE_CLASS STANDARD
+TIMEOUT_PARTITION 180
+TIMEOUT_PREPARE 180
+TIMEOUT_VERIFY 1200
+TIMEOUT_CLOSE 1200
+<<<
+
+EOF
+}
+
+######################################################################
+# Выводит в stdout ограниченный клиентский профиль BS
+# Нужен для работы команды inquire на BS
+######################################################################
+profile_client_BS()
+{
+cat <<EOF
+>>> CLIENT
+# BACKUPIDPREFIX GEN___
+APPLICATION_TYPE GENERIC
+TSM_BACKUP LATEST
+MAX_VERSIONS ADAPTIVE
+NEGATIVE_LIST NO_CHECK
+<<<
+
+EOF
+}
+
+######################################################################
+# выводит в stdout профиль offload
+# Parameters:
+# $1 = DB_NAME
+######################################################################
+profile_offload()
+{
+cat <<EOF
+>>> OFFLOAD
+BACKUP_METHOD TSM_CLIENT
+# MODE FULL
+ASNODENAME $DB_NAME_FCM
+DSM_DIR /opt/tivoli/tsm/client/ba/bin
+# DSM_CONFIG
+# VIRTUALFSNAME fcm
+<<<
+
+EOF
+}
+
+######## настройка удаленного сервера БД (BS) #########################
+echo "##### Configuring database server $DB_SERVER #####"
 
 # настраиваем рутовый ssh-доступ без пароля к серверу БД
 # необходим для настройки FCM и последующего запуска бакапов
@@ -121,41 +227,12 @@ rsync -a --exclude '/logs/' --exclude '/pipes/' --exclude '/repo/' --exclude '/s
 echo "Writing config files"
 
 # записываем infile
-ssh "root@$DB_SERVER" "echo \"$INSTANCE_DIR/data/PG_VERSION\" > $DB_ACS_DIR/infile"
+ssh "root@$DB_SERVER" "echo $INSTANCE_DIR/data/PG_VERSION > $DB_ACS_DIR/infile"
 
-# записываем общую часть profile
-ssh "root@$DB_SERVER" "cat > $DB_ACS_DIR/profile" <<EOF
->>> GLOBAL
-ACS_DIR $DB_ACS_DIR
-ACSD $DB_SERVER $ACSD_PORT
-TRACE YES
-<<<
-
->>> ACSD
-ACS_REPOSITORY $DB_ACS_DIR/repo
-# REPOSITORY_LABEL TSM
-<<<
-
->>> CLIENT
-# BACKUPIDPREFIX GEN___
-APPLICATION_TYPE GENERIC
-INFILE $DB_ACS_DIR/infile
-PRE_FLASH_CMD $DB_ACS_DIR/pgsql-preflash-cmd $INSTANCE_DIR/data $DB_PORT
-POST_FLASH_CMD $DB_ACS_DIR/pgsql-postflash-cmd $INSTANCE_DIR/data $DB_PORT
-TSM_BACKUP LATEST
-MAX_VERSIONS ADAPTIVE
-# LVM_FREEZE_THAW AUTO
-NEGATIVE_LIST NO_CHECK
-TIMEOUT_FLASH 120
-# GLOBAL_SYSTEM_IDENTIFIER
-# DEVICE_CLASS STANDARD
-TIMEOUT_PARTITION 180
-TIMEOUT_PREPARE 180
-TIMEOUT_VERIFY 1200
-TIMEOUT_CLOSE 1200
-<<<
-
-EOF
+# записываем profile
+profile_global    "$DB_ACS_DIR" "$DB_SERVER" "$ACSD_PORT"  | ssh "root@$DB_SERVER" "cat > $DB_ACS_DIR/profile"
+profile_acsd      "$DB_ACS_DIR"                            | ssh "root@$DB_SERVER" "cat >> $DB_ACS_DIR/profile"
+profile_client_PS "$DB_ACS_DIR" "$INSTANCE_DIR" "$DB_PORT" | ssh "root@$DB_SERVER" "cat >> $DB_ACS_DIR/profile"
 
 # добавляем в profile конфигурацию заданной системы хранения
 STORAGE_SYSTEM_TEMPLATE="$ACS_TEMPLATE/profile.$STORAGE_SYSTEM"
@@ -170,12 +247,11 @@ else
   exit 1
 fi
 
-# настраиваем сертификаты
-# на сервере БД (PS) удаляем существующую базу сертификатов и генерируем новые с помощью утилиты FCM setup_gen.sh
+# настраиваем сертификаты на сервере БД (PS): удаляем существующую базу сертификатов и генерируем новые с помощью утилиты FCM setup_gen.sh
 ssh "root@$DB_SERVER" "rm -f $DB_ACS_DIR/fcmcert.* $DB_ACS_DIR/fcmselfcert.arm"
-ssh "root@$DB_SERVER" "$DB_ACS_DIR/setup_gen.sh -a enable_gskit_PS -d $DB_ACS_DIR/../"
+ssh "root@$DB_SERVER" "$DB_ACS_DIR/setup_gen.sh -a enable_gskit_PS -d $DB_ACS_DIR/.."
 
-# финальная операция настройки - исправление владельца файлов, везде postgres:postgres, у двух suid-binary acsd и fcmutil владелец root:postgres
+# исправляем владельца файлов: везде postgres:postgres, у двух suid-binary acsd и fcmutil владелец root:postgres
 echo "Fixing file ownership"
 ssh "root@$DB_SERVER" "chown -R postgres:postgres $DB_ACS_DIR"
 ssh "root@$DB_SERVER" "chown root:postgres $DB_ACS_DIR/acsd $DB_ACS_DIR/fcmutil"
@@ -185,9 +261,8 @@ echo "Starting $DB_ACSD and $DB_ACSGEND"
 ssh "root@$DB_SERVER" "if initctl status $DB_ACSD    | grep -qcF stop; then initctl start $DB_ACSD;    fi";
 ssh "root@$DB_SERVER" "if initctl status $DB_ACSGEND | grep -qcF stop; then initctl start $DB_ACSGEND; fi";
 
-exit 0
-
 ###### настройка локального сервера (BS) ####################################
+echo "##### Configuring backup server #####"
 
 # корень chroot
 CHROOT_DIR="/var/run/fcm/$DB_NAME/$INSTANCE"
@@ -223,7 +298,21 @@ rsync -aW --exclude '/logs/' --exclude '/pipes/' --exclude '/repo/' --exclude '/
 
 echo "Stage 3: Copying FCM configuration from server $DB_SERVER ($INSTANCE_DIR/acs)"
 # копируем конфигурационные файлы FCM с сервера БД
-rsync -av "root@$DB_SERVER:$INSTANCE_DIR/acs/fcmselfcert.arm" ":$INSTANCE_DIR/acs/shared" ":$INSTANCE_DIR/acs/fcmcert.*" ":$INSTANCE_DIR/acs/profile" ":$INSTANCE_DIR/acs/infile" "$ACS_DIR/"
+rsync -av "root@$DB_SERVER:$INSTANCE_DIR/acs/fcmselfcert.arm" ":$INSTANCE_DIR/acs/shared/pwd.acsd" ":$INSTANCE_DIR/acs/infile" "$ACS_DIR/"
+
+# записываем профиль BS
+profile_global "$CHROOT_ACS_DIR" "$DB_SERVER" "$ACSD_PORT" | cat > "$ACS_DIR/profile"
+profile_client_BS                                          | cat >> "$ACS_DIR/profile"
+profile_offload "$DB_NAME"                                 | cat >> "$ACS_DIR/profile"
+
+# настраиваем сертификаты на бакапере (BS): удаляем существующую базу сертификатов и экспортируем сертификат fcmselfcert.arm с помощью утилиты FCM setup_gen.sh
+rm -f "$ACS_DIR/fcmcert.crl" "$ACS_DIR/fcmcert.kdb" "$ACS_DIR/fcmcert.rdb" "$ACS_DIR/fcmcert.sth"
+"$ACS_DIR/setup_gen.sh" -a enable_gskit_BS -d "$ACS_DIR/.."
+
+# исправляем владельца файлов: везде postgres:postgres, у двух suid-binary acsd и fcmutil владелец root:postgres
+echo "Fixing file ownership"
+chown -R postgres:postgres "$ACS_DIR"
+chown root:postgres "$ACS_DIR/acsd" "$ACS_DIR/fcmutil"
 
 echo "Stage 4: Configuring FCM mount daemon $ACSGENMNT"
 # настраиваем upstart-файл mount-демона
@@ -242,7 +331,6 @@ console output
 respawn
 
 pre-start script
-##  /usr/local/sbin/acs_chroot.sh $CHROOT_DIR $INSTANCE_DIR $ACS_DIR || { stop; exit 0; }
   [ -x "$CHROOT_ACS_DIR/acsgen" ] || { stop; exit 0; }
 end script
 
@@ -251,9 +339,10 @@ script
 end script
 EOF
 
-# каталог chroot должен существовать перед запуском upstart-скрипта
+# настройка chroot mounts
 mkdir -p "$CHROOT_DIR"
+### TODO!!!
 
-# запускаем mount daemon. Настройка chroot выполняется автоматически при старте демона.
+# запускаем mount daemon
 echo "Stage 5: Starting FCM mount daemon: $ACSGENMNT"
 #initctl start "$ACSGENMNT"

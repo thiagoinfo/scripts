@@ -5,10 +5,10 @@
 #
 # Matvey Marinin 2013
 #
-# Usage: pgsql-preflash-cmd [<database mount point>] [<db instance port>]
+# Usage: pgsql-preflash-cmd [-d <db data mount point>] [-p <db port>]
 #
-# default <database mount point> = /var/lib/pgsql/9.1/data
-# default <db instance port> = 5432
+# default <db data mount point> = /var/lib/pgsql/9.1/data
+# default <db port> = 5432
 #
 # Script usually runs as "postgres" uid, so "postgres" user needs permission to "sudo /sbin/fsfreeze" (see /etc/sudoers.d/06_fcm)
 #
@@ -16,7 +16,37 @@
 #
 # v2 - skip pg_start_backup()/pg_stop_backup() if server is stopped
 # v3 - pg_port and filesystem parameters
+# v4 - posix-style arguments to workaround PRE_FLASH_CMD/POST_FLASH_CMD limitations
 #
+
+usage() { 
+  echo "Usage: $0 [-d <db data mount point>] [-p <db port>]" 1>&2;
+  echo "default <db data mount point> = /var/lib/pgsql/9.1/data, default <db port> = 5432"
+  exit 1; 
+}
+
+while getopts ":s:p:" o; do
+    case "${o}" in
+        s)
+            s=${OPTARG}
+            ((s == 45 || s == 90)) || usage
+            ;;
+        p)
+            p=${OPTARG}
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+shift $((OPTIND-1))
+
+if [ -z "${s}" ] || [ -z "${p}" ]; then
+    usage
+fi
+
+echo "s = ${s}"
+echo "p = ${p}"
 
 ## Postgres database mount point  ##
 FILESYSTEM=$1
