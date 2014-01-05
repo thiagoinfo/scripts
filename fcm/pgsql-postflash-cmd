@@ -7,21 +7,44 @@
 #
 # Matvey Marinin 2013
 #
+# Usage: pgsql-postflash-cmd [-d <db data mount point>] [-p <db port>]
+#
+# default <db data mount point> = /var/lib/pgsql/9.1/data
+# default <db port> = 5432
+#
 # Script usually runs as "postgres" uid, so it needs permission to "sudo /sbin/fsfreeze" (see /etc/sudoers.d/06_fcm)
 #
 # NOTE: if "fsfreeze -u" command fail, Postgres will hang forever!!! Fix with "fsfreeze -u /var/lib/pgsql/9.1/data" as root.
 #
-# v3 - 
+# v2 - skip pg_start_backup()/pg_stop_backup() if server is stopped
+# v3 - pg_port and filesystem parameters
+# v4 - posix-style arguments to workaround PRE_FLASH_CMD/POST_FLASH_CMD limitations
 #
 
 ### There is no need to recover from errors, just exit  ###
 set -e
 
-## Postgres database mount point  ##
-FILESYSTEM=$1
+function usage() {
+  echo "Usage: $0 [-d <db data mount point>] [-p <db port>]" 1>&2
+  exit 1
+}
 
-## Postgres instance port ##
-PG_PORT=$2
+while getopts ":d:p:" o; do
+    case "${o}" in
+        d)
+            #pg data mount point
+            FILESYSTEM=${OPTARG}
+            ;;
+        p)
+            #pg port
+            PG_PORT=${OPTARG}
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+shift $((OPTIND-1))
 
 [[ -z "$FILESYSTEM" ]] && FILESYSTEM=/var/lib/pgsql/9.1/data
 [[ -z "$PG_PORT" ]] && PG_PORT=5432

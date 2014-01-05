@@ -139,8 +139,8 @@ cat <<EOF
 # BACKUPIDPREFIX GEN___
 APPLICATION_TYPE GENERIC
 INFILE $1/infile
-PRE_FLASH_CMD $1/pgsql-preflash-cmd $2/data $3
-POST_FLASH_CMD $1/pgsql-postflash-cmd $2/data $3
+PRE_FLASH_CMD $1/pgsql-preflash-cmd -p $3 -d "$2/data "
+POST_FLASH_CMD $1/pgsql-postflash-cmd -p $3 -d "$2/data "
 TSM_BACKUP LATEST
 MAX_VERSIONS ADAPTIVE
 # LVM_FREEZE_THAW AUTO
@@ -214,8 +214,8 @@ if [[ "$INSTANCE" != "9.1"  ]]; then
 fi
 
 echo "Stopping $DB_ACSD and $DB_ACSGEND"
-ssh "root@$DB_SERVER" "if initctl status $DB_ACSD    | grep -qcF start; then initctl stop $DB_ACSD;    fi";
 ssh "root@$DB_SERVER" "if initctl status $DB_ACSGEND | grep -qcF start; then initctl stop $DB_ACSGEND; fi";
+ssh "root@$DB_SERVER" "if initctl status $DB_ACSD    | grep -qcF start; then initctl stop $DB_ACSD;    fi";
 
 DB_ACS_DIR="$INSTANCE_DIR/acs"
 
@@ -223,8 +223,14 @@ DB_ACS_DIR="$INSTANCE_DIR/acs"
 echo "Copying FCM binary"
 rsync -a --exclude '/logs/' --exclude '/pipes/' --exclude '/repo/' --exclude '/shared/' --exclude '/profile*' --exclude '/infile*' --exclude '/fcmcert.*' --exclude '/fcmselfcert.arm' "$ACS_TEMPLATE/" "root@$DB_SERVER:$DB_ACS_DIR/"
 
-# создаем файлы конфигурации: 
+# создаем файлы конфигурации:
 echo "Writing config files"
+
+# создаем файл конфигурации sudo для запуска fsfreeze из-под postgres
+ssh "root@$DB_SERVER" "cat > /etc/sudoers.d/06_fcm" <<EOF
+Defaults:postgres !requiretty
+postgres ALL=NOPASSWD:/sbin/fsfreeze
+EOF
 
 # записываем infile
 ssh "root@$DB_SERVER" "echo $INSTANCE_DIR/data/PG_VERSION > $DB_ACS_DIR/infile"
@@ -298,7 +304,7 @@ rsync -aW --exclude '/logs/' --exclude '/pipes/' --exclude '/repo/' --exclude '/
 
 echo "Stage 3: Copying FCM configuration from server $DB_SERVER ($INSTANCE_DIR/acs)"
 # копируем конфигурационные файлы FCM с сервера БД
-rsync -av "root@$DB_SERVER:$INSTANCE_DIR/acs/fcmselfcert.arm" ":$INSTANCE_DIR/acs/shared/pwd.acsd" ":$INSTANCE_DIR/acs/infile" "$ACS_DIR/"
+rsync -a "root@$DB_SERVER:$INSTANCE_DIR/acs/fcmselfcert.arm" ":$INSTANCE_DIR/acs/shared/pwd.acsd" ":$INSTANCE_DIR/acs/infile" "$ACS_DIR/"
 
 # записываем профиль BS
 profile_global "$CHROOT_ACS_DIR" "$DB_SERVER" "$ACSD_PORT" | cat > "$ACS_DIR/profile"
@@ -339,10 +345,92 @@ script
 end script
 EOF
 
-# настройка chroot mounts
-mkdir -p "$CHROOT_DIR"
-### TODO!!!
+######################################################################
+# Filter out specified mount point from /etc/fstab
+# Parameters:
+# $1 = mount target
+function filter_fstab()
+{
+  awk '/^#/ || $2!="'$1'" {print $0}' /etc/fstab > /etc/fstab.new
+  mv -f /etc/fstab.new /etc/fstab
+}
 
-# запускаем mount daemon
-echo "Stage 5: Starting FCM mount daemon: $ACSGENMNT"
-#initctl start "$ACSGENMNT"
+######################################################################
+# Append bind-mount to /etc/fstab
+# Parameters:
+# $1 = source mount
+# $2 = bind target
+function append_fstab()
+{
+  echo "$1		$2		none bind" >> /etc/fstab
+}
+
+### настройка chroot ###
+echo "Stage 5: Configuring chroot $CHROOT_DIR"
+
+TARGET_ACS_DIR="${CHROOT_DIR}${INSTANCE_DIR}/acs"
+TARGET_DATA_DIR="${CHROOT_DIR}${INSTANCE_DIR}/data"
+
+# backup fstab
+cat /etc/fstab > /etc/fstab.bak
+
+# required chroot mounts
+CHROOT_MOUNTS="$CHROOT_DIR $CHROOT_DIR/dev $CHROOT_DIR/dev/pts $CHROOT_DIR/dev/shm $CHROOT_DIR/proc $CHROOT_DIR/sys $CHROOT_DIR/tmp $TARGET_ACS_DIR"
+
+# check /etc/fstab for all mounts to exist
+FSTAB_OK=1
+for m in $CHROOT_MOUNTS; do
+  if ! awk '!/^#/ {print $2;}' /etc/fstab | grep -cxqF "$m"; then
+    FSTAB_OK=0
+  fi
+done
+
+if (( "FSTAB_OK"== 0 )); then
+  #one of required mounts does not exists in /etc/fstab
+  echo "Configuring /etc/fstab"
+
+  #remove existing bind-mounts
+  for m in $CHROOT_MOUNTS; do filter_fstab "$m"; done
+  
+  #prepend empty line if need
+  if [[ -n "$(tail -n1 /etc/fstab)" ]]; then echo >> /etc/fstab; fi
+
+  #add all required bind-mounts in a right order
+  append_fstab /		$CHROOT_DIR
+  append_fstab /dev		$CHROOT_DIR/dev
+  append_fstab /dev/pts		$CHROOT_DIR/dev/pts
+  append_fstab /dev/shm		$CHROOT_DIR/dev/shm
+  append_fstab /proc		$CHROOT_DIR/proc
+  append_fstab /sys		$CHROOT_DIR/sys
+  append_fstab /tmp		$CHROOT_DIR/tmp
+  append_fstab $ACS_DIR		$TARGET_ACS_DIR
+fi
+
+######################################################################
+# Mount /etc/fstab entry if need
+# Parameters:
+# $1 = mount target
+function mnt_helper {
+  MOUNT_POINT=${1%/} #remove trailing slash
+  if ! awk '{ print $2}' /proc/mounts | grep -cxqF "$MOUNT_POINT"; then
+    echo "Mounting $MOUNT_POINT"
+    mount "$MOUNT_POINT"
+  fi
+}
+
+mnt_helper $CHROOT_DIR
+mnt_helper $CHROOT_DIR/dev
+mnt_helper $CHROOT_DIR/dev/pts
+mnt_helper $CHROOT_DIR/dev/shm
+mnt_helper $CHROOT_DIR/proc
+mnt_helper $CHROOT_DIR/sys
+mnt_helper $CHROOT_DIR/tmp
+mnt_helper $TARGET_ACS_DIR
+mkdir -pv "$TARGET_DATA_DIR"
+
+# show chroot mounts
+#mount | awk '$3~"^'$CHROOT_DIR'" {print}'
+
+# start mount daemon
+echo "Stage 6: Starting FCM mount daemon: $ACSGENMNT"
+initctl start "$ACSGENMNT"

@@ -19,20 +19,20 @@
 # v4 - posix-style arguments to workaround PRE_FLASH_CMD/POST_FLASH_CMD limitations
 #
 
-usage() { 
-  echo "Usage: $0 [-d <db data mount point>] [-p <db port>]" 1>&2;
-  echo "default <db data mount point> = /var/lib/pgsql/9.1/data, default <db port> = 5432"
-  exit 1; 
+function usage() { 
+  echo "Usage: $0 [-d <db data mount point>] [-p <db port>]" 1>&2
+  exit 1
 }
 
-while getopts ":s:p:" o; do
+while getopts ":d:p:" o; do
     case "${o}" in
-        s)
-            s=${OPTARG}
-            ((s == 45 || s == 90)) || usage
+        d)
+            #pg data mount point
+            FILESYSTEM=${OPTARG}
             ;;
         p)
-            p=${OPTARG}
+            #pg port
+            PG_PORT=${OPTARG}
             ;;
         *)
             usage
@@ -41,23 +41,15 @@ while getopts ":s:p:" o; do
 done
 shift $((OPTIND-1))
 
-if [ -z "${s}" ] || [ -z "${p}" ]; then
-    usage
-fi
-
-echo "s = ${s}"
-echo "p = ${p}"
-
-## Postgres database mount point  ##
-FILESYSTEM=$1
-
-## Postgres instance port ##
-PG_PORT=$2
-
 [[ -z "$FILESYSTEM" ]] && FILESYSTEM=/var/lib/pgsql/9.1/data
 [[ -z "$PG_PORT" ]] && PG_PORT=5432
 
 echo "Running $(basename $0) as UID $EUID, filesystem $FILESYSTEM, pg_port $PG_PORT"
+
+if (( $# > 0 )); then
+  echo "Too many arguments"
+  usage
+fi
 
 ### Find uid of "postgres" user ###
 PG_UID=$(id -u postgres)
