@@ -13,7 +13,7 @@
 #   <db_port>      - необязательный параметр для серверов с несколькими инстансами, номер порта Postgres. Если не указан - берется из <instance_dir> или стандартный 5432
 #
 # Схема chroot:
-# /var/run/fcm/<db_name>/<instance>/ = chroot( / )
+# /var/acs/chroot/<db_name>/<instance>/ = chroot( / )
 #                                  |
 #                                  -- dev,proc,sys,tmp = mount_bind( соответствующие служебные ФС )
 #                                  |
@@ -21,10 +21,11 @@
 #                                                              |
 #                                                              -- acs  = mount_bind( /var/fcm/<db_name>/<instance>/acs )
 #                                                              -- data = flashcopy mount point
-# Каталоги с данными:
-# /var/run/fcm/<db_name>/<instance> - корневой каталог chroot инстанса FCM
-# /var/fcm/<db_name>/<instance>/acs - каталог acs (бинарники, профиль, логи)
-# /var/run/fcm/<db_name>/<instance>/var/lib/pgsql/<instance>/data - по этому пути точка монтирования flashcopy будет видна в корневой ФС
+# Каталоги:
+# /opt/tivoli/acs/template - каталог с дистрибутивом FCM
+# /opt/tivoli/acs/data/<db_name>/<instance>/acs - каталог acs для конкретного инстанса БД (бинарники, профиль, логи)
+# /opt/tivoli/acs/chroot/<db_name>/<instance> - корневой каталог chroot конкретного инстанса FCM
+# /opt/tivoli/acs/chroot/<db_name>/<instance>/var/lib/pgsql/<instance>/data - по этому пути точка монтирования flashcopy видна в корневой ФС
 # /var/lib/pgsql - каталог с инстансами БД, видимый через chroot, должен быть пустым в корневой ФС
 #
 
@@ -32,9 +33,9 @@ DB_SERVER=$1
 INSTANCE_DIR=$2
 DB_PORT=$3
 
+## TODO: parameterization!!
 STORAGE_SYSTEM="dev-svc1"
 ACSD_PORT=50001
-
 
 if [[ -z "$DB_SERVER" ]]; then
   echo "ERROR: <db_server> is not specified                           " 1>&2
@@ -66,8 +67,17 @@ echo "INSTANCE_DIR = $INSTANCE_DIR"
 echo "INSTANCE = $INSTANCE"
 echo "DB_PORT = $DB_PORT"
 
-# шаблон чистого каталога acs с исполняемыми файлами
-ACS_TEMPLATE="/opt/tivoli/acs_template"
+# Шаблон чистого каталога acs с исполняемыми файлами
+ACS_TEMPLATE="/opt/tivoli/acs/template"
+[[ -d "$ACS_TEMPLATE" ]] || { echo "ERROR: FlashCopy Manager template dir $ACS_TEMPLATE is not found"; exit 1;}
+
+# корень chroot
+CHROOT_DIR="/opt/tivoli/acs/chroot/$DB_NAME/$INSTANCE"
+mkdir -p "$CHROOT_DIR"
+
+# каталог инстанса FCM
+ACS_DIR="/opt/tivoli/acs/data/$DB_NAME/$INSTANCE/acs"
+mkdir -p "$ACS_DIR"
 
 ######################################################################
 # setuputil
@@ -246,10 +256,17 @@ STORAGE_SYSTEM_TEMPLATE="$ACS_TEMPLATE/profile.$STORAGE_SYSTEM"
 if [[ -f "$STORAGE_SYSTEM_TEMPLATE" ]]; then
   echo "Configuring storage system profile for $STORAGE_SYSTEM"
   ssh "root@$DB_SERVER" "cat >> $DB_ACS_DIR/profile" < "$STORAGE_SYSTEM_TEMPLATE"
-  # также копируем файл паролей для заданной системы хранения
-  rsync -a "$ACS_TEMPLATE/shared/pwd.acsd.$STORAGE_SYSTEM" "root@$DB_SERVER:$DB_ACS_DIR/shared/pwd.acsd"
 else
   echo "Cant find storage system profile: $STORAGE_SYSTEM_TEMPLATE" 1>&2
+  exit 1
+fi
+
+# копируем файл паролей acsd и системы хранения
+STORAGE_SYSTEM_PWD_ACSD="$ACS_TEMPLATE/shared/pwd.acsd.$STORAGE_SYSTEM"
+if [[ -f "$STORAGE_SYSTEM_PWD_ACSD" ]]; then
+  rsync -a "$STORAGE_SYSTEM_PWD_ACSD" "root@$DB_SERVER:$DB_ACS_DIR/shared/pwd.acsd"
+else
+  echo "Cant find storage system password file: $STORAGE_SYSTEM_PWD_ACSD" 1>&2
   exit 1
 fi
 
@@ -269,12 +286,6 @@ ssh "root@$DB_SERVER" "if initctl status $DB_ACSGEND | grep -qcF stop; then init
 
 ###### настройка локального сервера (BS) ####################################
 echo "##### Configuring backup server #####"
-
-# корень chroot
-CHROOT_DIR="/var/run/fcm/$DB_NAME/$INSTANCE"
-
-# каталог нового инстанса FCM
-ACS_DIR="/var/fcm/$DB_NAME/$INSTANCE/acs"
 
 # путь к каталогу FCM внутри chroot
 CHROOT_ACS_DIR="$INSTANCE_DIR/acs"
@@ -314,6 +325,16 @@ profile_offload "$DB_NAME"                                 | cat >> "$ACS_DIR/pr
 # настраиваем сертификаты на бакапере (BS): удаляем существующую базу сертификатов и экспортируем сертификат fcmselfcert.arm с помощью утилиты FCM setup_gen.sh
 rm -f "$ACS_DIR/fcmcert.crl" "$ACS_DIR/fcmcert.kdb" "$ACS_DIR/fcmcert.rdb" "$ACS_DIR/fcmcert.sth"
 "$ACS_DIR/setup_gen.sh" -a enable_gskit_BS -d "$ACS_DIR/.."
+
+# копируем файл паролей acsd и системы хранения
+STORAGE_SYSTEM_PWD_ACSD="$ACS_TEMPLATE/shared/pwd.acsd.$STORAGE_SYSTEM"
+if [[ -f "$STORAGE_SYSTEM_PWD_ACSD" ]]; then
+  rsync -a "$STORAGE_SYSTEM_PWD_ACSD" "$ACS_DIR/shared/pwd.acsd"
+else
+  echo "Cant find storage system password file: $STORAGE_SYSTEM_PWD_ACSD" 1>&2
+  exit 1
+fi
+
 
 # исправляем владельца файлов: везде postgres:postgres, у двух suid-binary acsd и fcmutil владелец root:postgres
 echo "Fixing file ownership"
@@ -369,7 +390,10 @@ function append_fstab()
 echo "Stage 5: Configuring chroot $CHROOT_DIR"
 
 TARGET_ACS_DIR="${CHROOT_DIR}${INSTANCE_DIR}/acs"
+mkdir -pv "$TARGET_ACS_DIR"
+
 TARGET_DATA_DIR="${CHROOT_DIR}${INSTANCE_DIR}/data"
+mkdir -pv "$TARGET_DATA_DIR"
 
 # backup fstab
 cat /etc/fstab > /etc/fstab.bak
@@ -426,7 +450,8 @@ mnt_helper $CHROOT_DIR/proc
 mnt_helper $CHROOT_DIR/sys
 mnt_helper $CHROOT_DIR/tmp
 mnt_helper $TARGET_ACS_DIR
-mkdir -pv "$TARGET_DATA_DIR"
+
+
 
 # show chroot mounts
 #mount | awk '$3~"^'$CHROOT_DIR'" {print}'
