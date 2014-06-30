@@ -1,0 +1,19 @@
+#!/bin/bash
+#
+# Run remote command on each server in list
+#
+# $1 - text file with server list
+# $2 - remote command to run
+# $3... - optional arguments to remote command
+#
+# usage: for_servers_ssh ~/server_list sudo df -h
+
+USER=$(whoami)
+
+while read -u "$fd_num" line; do
+  SERVER="$line"
+
+  echo "Connecting to $SERVER"
+  ssh -n "$USER@$SERVER" "${@:2}"
+
+done {fd_num}<"$1"
