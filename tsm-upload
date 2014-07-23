@@ -2,38 +2,40 @@
 #
 # TSM client package uploader
 #  
-# Downloads tar distributive from specified URL (IBM FTP server), unpacks and updates Spacewalk repo
+# Unpacks TSM BA client distributive and updates Spacewalk repo
 #
-# Matvey Marinin 2013
+# Matvey Marinin 2014
+#
+# v2 - removed download fuctionality
 #
 
 if [ $# -ne 1 ]
 then
-  echo "Usage: $(basename $0) <URL>"
-  echo "<URL> = ftp://ftp.software.ibm.com/storage/tivoli-storage-management/maintenance/client/v6r4/Linux/LinuxX86/BA/v641/6.4.1.0-TIV-TSMBAC-LinuxX86.tar for example"
+  echo "Usage: $(basename $0) <TSMBAC-xxx.tar>"
   exit 1
 fi
 
 TMPDIR=$(mktemp -d)
-pushd "$TMPDIR" > /dev/null
-trap 'echo "Cleaning up $TMPDIR"; popd > /dev/null; rm -rf "$TMPDIR"' INT TERM EXIT
-echo "Temp dir: $TMPDIR"
+TARFILE=$1
+TMPTAR="$TMPDIR"/$(basename "$TARFILE")
 
-URL=$1
-TARPATH="$TMPDIR"/$(basename "$URL")
+echo "Temp dir: $TMPDIR"
+cp -f "$TARFILE" "$TMPTAR"
+
+# cd to temp dir
+pushd "$TMPDIR" > /dev/null
+
+#setup trap to cleanup temp dir on exit
+trap 'echo "Cleaning up $TMPDIR"; popd > /dev/null; rm -rf "$TMPDIR";' INT TERM EXIT
+
+echo Unpacking "$TMPTAR"
+tar xvf "$TMPTAR"
 
 REPO=tsm-client-x64
 REPO_ADMIN=tsm-repo-uploader
 REPO_ADMIN_PWD=N72bdsG26xkbFz
 
-echo "Downloading $URL"
-wget -P "$TMPDIR" "$URL"
+find "$TMPDIR" -iname '*.rpm' | xargs rhnpush -v --nosig --tolerant --channel="$REPO" --server=http://localhost/APP -u "$REPO_ADMIN" -p "$REPO_ADMIN_PWD"
 
-if [ $? == 0 ]; then
-    echo Unpacking "$TARPATH"
-    tar xvf "$TARPATH"
-
-    find "$TMPDIR" -iname '*.rpm' | xargs rhnpush -v --nosig --tolerant --channel="$REPO" --server=http://localhost/APP -u "$REPO_ADMIN" -p "$REPO_ADMIN_PWD"
-fi
 
 
