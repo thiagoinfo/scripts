@@ -1,0 +1,10 @@
+#!/bin/bash
+#
+# Start new bash session inside Docker container
+#
+# Wraps nsenter
+#
+set -e
+CONTAINER_NAME="$1"
+ROOT_PID=$(docker inspect --format "{{ .State.Pid }}" "$CONTAINER_NAME")
+[[ -n "$ROOT_PID" ]] && nsenter --target "$ROOT_PID" --mount --uts --ipc --net --pid
