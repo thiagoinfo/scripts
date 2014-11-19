@@ -1,0 +1,11 @@
+--- a/daemon/execdriver/native/template/default_template.go	2014-11-18 14:56:55.000000000 +0000
++++ b/daemon/execdriver/native/template/default_template.go	2014-11-18 14:58:06.000000000 +0000
+@@ -28,7 +28,7 @@
+ 		Namespaces: map[string]bool{
+ 			"NEWNS":  true,
+ 			"NEWUTS": true,
+-			"NEWIPC": true,
++			"NEWIPC": false,
+ 			"NEWPID": true,
+ 			"NEWNET": true,
+ 		},
