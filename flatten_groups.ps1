@@ -27,6 +27,13 @@ Param(
     [parameter(Mandatory=$true)]
     [string] $target
 )
+
+    #Check if target group is not member of any group (to prevent accidental wrong group overwrite)
+    if (Get-ADPrincipalGroupMembership -Identity $target) {
+        Write-Error "ERROR: Target group should not be member of any groups, check source and target group names!"
+        Exit 1
+    }
+
     $current = Get-ADGroupMember -Identity $target
     $shouldbe = Get-ADGroupMember -Recursive -Identity $source
 
