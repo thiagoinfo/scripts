@@ -1,3 +1,0 @@
-Defaults:postgres !requiretty
-postgres ALL=NOPASSWD:/sbin/fsfreeze
-
